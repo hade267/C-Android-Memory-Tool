@@ -211,6 +211,54 @@ public:
         return (size_t)ret;
     }
 
+
+
+    // Ring 0 Search Wrapper
+    // Returns number of matches found in this chunk
+    // results: buffer to store found addresses (must be large enough for max_results * 8)
+    int search_kernel(uint64_t addr, uint64_t len, uint64_t value, int val_size, 
+                      uint64_t* result_buffer, int max_results) {
+        if (target_pid <= 0) return 0;
+        
+        struct kpm_cmd cmd;
+        
+        // Matches kernel layout: { u64 value; u32 val_size; u32 max_results; u64 count_ptr; u64 buf_ptr; }
+        struct __attribute__((packed)) {
+            uint64_t val;
+            uint32_t val_size;
+            uint32_t max_res;
+            uint64_t count_ptr;
+            uint64_t buf_ptr;
+        } config;
+        
+        uint32_t found_count = 0;
+        
+        config.val = value;
+        config.val_size = (uint32_t)val_size;
+        config.max_res = (uint32_t)max_results;
+        config.count_ptr = (uint64_t)&found_count;
+        config.buf_ptr = (uint64_t)result_buffer;
+        
+        cmd.pid = target_pid;
+        cmd.op = 2; // CMD_SEARCH
+        cmd.addr = addr;
+        cmd.len = len;
+        cmd.data = (uint64_t)&config;
+        
+        int ret;
+        int retries = 0;
+        do {
+            ret = syscall(SYS_prctl, MAGIC_CODE, &cmd, 0, 0, 0);
+            retries++;
+        } while (ret < 0 && errno == EINTR && retries < 100);
+
+        if (ret < 0) {
+            return 0; 
+        }
+        
+        return (int)found_count;
+    }
+
     template <typename T>
     T read(uint64_t address) {
         T data = {};

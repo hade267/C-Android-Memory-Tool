@@ -188,39 +188,36 @@ template <typename T>
 void MemoryTool::SearchValue(T value, const std::vector<MemoryMap>& maps, int type) {
     m_results.clear();
     
-    // Buffer for bulk reading. KPM driver supports up to 1MB, we use READ_CHUNK_SIZE (128KB default)
-    std::vector<uint8_t> buffer(READ_CHUNK_SIZE); 
-    
+    // Result buffer for Kernel to write into (Max 2048 results per chunk to be safe)
+    const int MAX_KERNEL_RES = 2048;
+    std::vector<uint64_t> kernelResBuf(MAX_KERNEL_RES); 
+
     for (const auto& map : maps) {
         ADDRESS curr = map.startAddr;
         while (curr < map.endAddr) {
-            size_t readSize = std::min((size_t)(map.endAddr - curr), READ_CHUNK_SIZE);
-            if (readSize < sizeof(T)) break;
+            // Kernel Driver handles 64KB chunks internally usually, but we can pass larger.
+            // However, to keep it responsive and update progress, use 512KB chunks.
+            size_t readSize = std::min((size_t)(map.endAddr - curr), (size_t)(512 * 1024)); 
+            
+            // Call Ring 0 Search
+            // Explicit cast to uint64_t for value to handle all types
+            uint64_t val64 = 0;
+            if (sizeof(T) == 4) val64 = (uint64_t)*(uint32_t*)&value;
+            else if (sizeof(T) == 8) val64 = *(uint64_t*)&value;
+            else if (sizeof(T) == 1) val64 = (uint64_t)*(uint8_t*)&value;
+            else if (sizeof(T) == 2) val64 = (uint64_t)*(uint16_t*)&value;
 
-            size_t bytesRead = kpm.read_raw(curr, buffer.data(), readSize);
-            if (bytesRead > 0) {
-                // Scan buffer
-                size_t count = bytesRead / sizeof(T); // Only align to Type size? No, usually 4-byte aligned or 1-byte?
-                // Standard game cheat tools usually scan aligned to the type size or 4 bytes.
-                // To be safe and thorough, let's scan every 1 byte? No, too slow.
-                // Standard alignment: 
-                // DWORD/FLOAT -> 4 bytes aligned
-                // WORD -> 2 bytes
-                // BYTE -> 1 byte
-                // QWORD/DOUBLE -> 4 or 8 bytes. Let's assume 4 for ARM64 compatibility or 8?
-                
-                size_t alignment = sizeof(T);
-                if (alignment > 4) alignment = 4; // Allow 4-byte alignment for 64-bit values too (common in Android mapping)
-
-                for (size_t i = 0; i <= bytesRead - sizeof(T); i += alignment) {
-                    T* valPtr = (T*)(buffer.data() + i);
-                    if (*valPtr == value) {
-                        m_results.push_back({curr + i, type, map.name});
-                    }
+            int found = kpm.search_kernel(curr, readSize, val64, sizeof(T), kernelResBuf.data(), MAX_KERNEL_RES);
+            
+            if (found > 0) {
+                for (int i = 0; i < found; i++) {
+                     m_results.push_back({kernelResBuf[i], type, map.name});
                 }
             }
-             curr += readSize;
 
+            curr += readSize;
+            
+            // Still throttle slightly if Safe Mode is on, but much less needed since no syscall spam
             if (m_safeMode) std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
